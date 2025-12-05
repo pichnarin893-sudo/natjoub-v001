@@ -1,0 +1,255 @@
+# ==========================================
+# NatJoub Backend - Development CI/CD Pipeline
+# ==========================================
+# This workflow runs on push to dev/development branch
+# It builds, tests, and deploys the application
+
+name: Development CI/CD
+
+# ==========================================
+# Trigger Configuration
+# ==========================================
+on:
+  push:
+    branches:
+      - dev
+      - development
+  pull_request:
+    branches:
+      - dev
+      - development
+
+# ==========================================
+# Environment Variables
+# ==========================================
+env:
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# ==========================================
+# Jobs
+# ==========================================
+jobs:
+  # ------------------------------------------
+  # Job 1: Lint and Test
+  # ------------------------------------------
+  test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+
+    # Service containers for testing
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: net_joub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # Checkout code
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      # Setup Node.js
+      - name: 🔧 Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      # Install dependencies
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      # Run linting (if you have eslint configured)
+      - name: 🔍 Run linting
+        run: npm run lint || echo "No lint script found, skipping..."
+        continue-on-error: true
+
+      # Run tests
+      - name: 🧪 Run tests
+        env:
+          NODE_ENV: test
+          DB_USER: postgres
+          DB_PASS: postgres
+          DB_NAME: net_joub_test
+          DB_HOST: localhost
+          DB_PORT: 5432
+          JWT_SECRET: test_jwt_secret_key_for_testing
+          JWT_REFRESH_SECRET: test_refresh_secret_for_testing
+        run: npm test
+
+      # Upload test coverage (if using coverage tools)
+      - name: 📊 Upload coverage reports
+        uses: codecov/codecov-action@v3
+        if: always()
+        continue-on-error: true
+        with:
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+
+  # ------------------------------------------
+  # Job 2: Build Docker Image
+  # ------------------------------------------
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # Checkout code
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up Docker Buildx (for advanced features)
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Login to GitHub Container Registry
+      - name: 🔐 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract metadata for Docker
+      - name: 📝 Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=dev-latest,enable={{is_default_branch}}
+
+      # Build and push Docker image
+      - name: 🏗️ Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      # Output image details
+      - name: 📋 Image digest
+        run: echo ${{ steps.meta.outputs.tags }}
+
+  # ------------------------------------------
+  # Job 3: Database Migrations (Optional)
+  # ------------------------------------------
+  migrate:
+    name: Run Database Migrations
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'  # Only on push, not PRs
+
+    steps:
+      # Checkout code
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      # Setup Node.js
+      - name: 🔧 Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      # Install dependencies
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      # Run migrations on development database
+      # NOTE: This requires database access from GitHub Actions
+      # You might need to set up a VPN or expose your DB securely
+      - name: 🔄 Run database migrations
+        env:
+          NODE_ENV: development
+          DB_USER: ${{ secrets.DEV_DB_USER }}
+          DB_PASS: ${{ secrets.DEV_DB_PASS }}
+          DB_NAME: ${{ secrets.DEV_DB_NAME }}
+          DB_HOST: ${{ secrets.DEV_DB_HOST }}
+          DB_PORT: ${{ secrets.DEV_DB_PORT }}
+        run: |
+          echo "Running migrations on development database..."
+          npx sequelize-cli db:migrate
+        continue-on-error: true  # Don't fail the build if migrations fail
+
+  # ------------------------------------------
+  # Job 4: Deploy (Optional)
+  # ------------------------------------------
+  deploy:
+    name: Deploy to Development Server
+    runs-on: ubuntu-latest
+    needs: [build, migrate]
+    if: github.event_name == 'push'  # Only on push, not PRs
+    environment:
+      name: development
+      url: https://dev.natjoub.com  # Your dev URL
+
+    steps:
+      # Checkout code
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      # Deploy via SSH (example using Docker Compose)
+      - name: 🚀 Deploy to development server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.DEV_SERVER_HOST }}
+          username: ${{ secrets.DEV_SERVER_USER }}
+          key: ${{ secrets.DEV_SERVER_SSH_KEY }}
+          port: ${{ secrets.DEV_SERVER_PORT || 22 }}
+          script: |
+            cd /path/to/your/app
+            docker-compose pull
+            docker-compose up -d --remove-orphans
+            docker system prune -f
+
+      # Health check after deployment
+      - name: 🏥 Health check
+        run: |
+          sleep 10
+          curl -f https://dev.natjoub.com/health || exit 1
+
+  # ------------------------------------------
+  # Job 5: Notify (Optional)
+  # ------------------------------------------
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [test, build, deploy]
+    if: always()
+
+    steps:
+      # Slack notification
+      - name: 📢 Slack notification
+        uses: 8398a7/action-slack@v3
+        if: always()
+        with:
+          status: ${{ job.status }}
+          text: 'Deployment to development completed!'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

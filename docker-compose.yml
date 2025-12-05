@@ -1,42 +1,193 @@
-version: '3.8'
+# ==========================================
+# NatJoub - Development Docker Compose
+# ==========================================
+# This configuration sets up the complete development environment
+# Usage: docker-compose up -d
 
+#version: '3.8'
+
+# ==========================================
+# Services Definition
+# ==========================================
 services:
+  # ------------------------------------------
+  # Backend Application (Node.js/Express)
+  # ------------------------------------------
   app:
+    container_name: natjoub-backend-dev
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
+      target: development  # Use development stage from multi-stage build
+      # Build arguments (if needed in future)
+      args:
+        NODE_VERSION: 20
+
+    # Environment variables
     env_file:
-      - .env
+      - .env  # Load from .env file
     environment:
-      # force DB_HOST to the db service in compose
-      - DB_HOST=db
+      # Override specific values for Docker environment
+      - NODE_ENV=development
+      - DB_HOST=db  # Points to PostgreSQL service name
       - DB_PORT=5432
-      - MIGRATE=true
-    volumes:
-      - .:/usr/src/app
-      - /usr/src/app/node_modules
+      - MIGRATE=true  # Auto-run migrations on startup
+      - SEED=false  # Set to true if you want to seed data
+
+    # Port mapping: host:container
     ports:
-      - "3000:3000"
+      - "3000:3000"  # Main application port
+
+    # Volume mounts for hot-reload development
+    volumes:
+      # Mount source code for live changes
+      - .:/usr/src/app
+      # Use anonymous volume for node_modules (prevents overwriting)
+      # This keeps container's node_modules separate from host
+      - /usr/src/app/node_modules
+      # Optional: Share package-lock for consistency
+      - ./package-lock.json:/usr/src/app/package-lock.json:ro
+
+    # Service dependencies
+    depends_on:
+      db:
+        condition: service_healthy  # Wait for DB health check
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Attach to custom network
+    networks:
+      - natjoub-network
+
+    # Development-specific: Enable stdin and tty for debugging
+    stdin_open: true
+    tty: true
+
+  # ------------------------------------------
+  # PostgreSQL Database
+  # ------------------------------------------
+  db:
+    container_name: natjoub-postgres-dev
+    image: postgres:15-alpine  # Using Alpine for smaller image size
+
+    # Environment variables for PostgreSQL
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+      POSTGRES_DB: ${DB_NAME:-net_joub_v1}
+      # Performance tuning for development
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
+      # Enable detailed logging in dev
+      POSTGRES_LOG_STATEMENT: all
+
+    # Port mapping (using 5435 on host to avoid conflicts)
+    ports:
+      - "5435:5432"
+
+    # Persistent volume for database data
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Optional: Custom init scripts
+      # - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+
+    # Health check for database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-net_joub_v1}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Attach to custom network
+    networks:
+      - natjoub-network
+
+  # ------------------------------------------
+  # pgAdmin (Database Management UI)
+  # ------------------------------------------
+  pgadmin:
+    container_name: natjoub-pgadmin-dev
+    image: dpage/pgadmin4:latest
+
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@natjoub.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'  # Disable server mode for dev
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+
+    # Port mapping
+    ports:
+      - "5050:80"
+
+    # Persistent volume for pgAdmin settings
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+    # Only start when database is healthy
     depends_on:
       db:
         condition: service_healthy
+
+    # Restart policy
     restart: unless-stopped
 
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASS}
-      POSTGRES_DB: ${DB_NAME}
-    ports:
-      - "5435:5432"
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+    # Attach to custom network
+    networks:
+      - natjoub-network
 
+  # ------------------------------------------
+  # Redis (Optional - for caching/sessions)
+  # ------------------------------------------
+  # Uncomment if you need Redis for caching or session management
+  # redis:
+  #   container_name: natjoub-redis-dev
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   command: redis-server --appendonly yes
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+  #   restart: unless-stopped
+  #   networks:
+  #     - natjoub-network
+
+# ==========================================
+# Networks Definition
+# ==========================================
+networks:
+  natjoub-network:
+    driver: bridge
+    # Optional: Define custom subnet
+    # ipam:
+    #   config:
+    #     - subnet: 172.28.0.0/16
+
+# ==========================================
+# Volumes Definition
+# ==========================================
 volumes:
-  db_data:
+  # PostgreSQL data persistence
+  postgres_data:
+    driver: local
+    # Optional: Specify mount point
+    # driver_opts:
+    #   type: none
+    #   device: ./data/postgres
+    #   o: bind
+
+  # pgAdmin settings persistence
+  pgadmin_data:
+    driver: local
+
+  # Redis data persistence (if using Redis)
+  # redis_data:
+  #   driver: local

@@ -1,52 +1,103 @@
-# File: `Dockerfile.dev`
-FROM node:20
+# ==========================================
+# NatJoub Backend - Multi-Stage Dockerfile
+# ==========================================
+# This Dockerfile uses multi-stage builds for optimization
+# Stages: base, development, production
 
+# ==========================================
+# Stage 1: Base Image
+# ==========================================
+# Use official Node.js LTS (Long Term Support) version
+FROM node:20-alpine AS base
+
+# Install dumb-init to handle signals properly (PID 1 problem)
+# Add bash for entrypoint scripts
+RUN apk add --no-cache dumb-init bash
+
+# Set working directory
 WORKDIR /usr/src/app
 
-# copy package files and install deps (dev included)
+# Copy package files for dependency installation
+# This layer is cached unless package files change
 COPY package*.json ./
+
+# ==========================================
+# Stage 2: Development
+# ==========================================
+FROM base AS development
+
+# Set Node environment to development
+ENV NODE_ENV=development
+
+# Install ALL dependencies (including devDependencies)
+# Use npm ci for reproducible builds (respects package-lock.json)
 RUN npm ci
 
-# copy app
+# Copy application source code
 COPY . .
 
-# make entrypoint executable
-COPY entrypoint.dev.sh /usr/local/bin/entrypoint.dev.sh
-RUN chmod +x /usr/local/bin/entrypoint.dev.sh
+# Copy and make entrypoint script executable
+COPY scripts/docker-entrypoint.dev.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-ENV NODE_ENV=development
+# Expose application port
 EXPOSE 3000
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.dev.sh"]
-CMD ["npm", "run", "dev"]
+# Use dumb-init to properly handle signals (SIGTERM, SIGINT)
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 
-# File: `entrypoint.dev.sh`
-#!/usr/bin/env bash
-#set -e
-#
-#: "${DB_HOST:=db}"
-#: "${DB_PORT:=5432}"
-#: "${DB_USER:=postgres}"
-#: "${DB_PASS:=postgres}"
-#: "${DB_NAME:=app_db}"
-#
-#echo "Waiting for Postgres at ${DB_HOST}:${DB_PORT}..."
-## portable tcp check using bash /dev/tcp
-#until bash -c "cat < /dev/tcp/${DB_HOST}/${DB_PORT}" >/dev/null 2>&1; do
-#  printf '.'
-#  sleep 1
-#done
-#echo " Postgres is up."
-#
-## run migrations if requested
-#if [ "${MIGRATE:-false}" = "true" ]; then
-#  echo "Running migrations..."
-#  # if you use sequelize-cli and have config that reads env vars, run like below
-#  npx sequelize-cli db:migrate --url "postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}" || {
-#    echo "Migrations failed"; exit 1;
-#  }
-#fi
-#
-#exec "$@"
+# Run entrypoint script then start dev server with nodemon
+CMD ["/usr/local/bin/docker-entrypoint.sh", "npm", "run", "dev"]
 
+# ==========================================
+# Stage 3: Production Dependencies
+# ==========================================
+FROM base AS production-deps
 
+# Set Node environment to production
+ENV NODE_ENV=production
+
+# Install ONLY production dependencies
+# --omit=dev excludes devDependencies
+# --ignore-scripts prevents running any install scripts
+RUN npm ci --omit=dev --ignore-scripts
+
+# ==========================================
+# Stage 4: Production Build
+# ==========================================
+FROM base AS production
+
+# Set Node environment to production
+ENV NODE_ENV=production
+
+# Create non-root user for security
+# -r: system user, -s: shell
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Copy production dependencies from production-deps stage
+COPY --from=production-deps --chown=nodejs:nodejs /usr/src/app/node_modules ./node_modules
+
+# Copy application source
+COPY --chown=nodejs:nodejs . .
+
+# Copy and make production entrypoint executable
+COPY --chown=nodejs:nodejs scripts/docker-entrypoint.prod.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Switch to non-root user
+USER nodejs
+
+# Expose application port
+EXPOSE 3000
+
+# Add healthcheck
+# This tells Docker how to test if container is still working
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+
+# Use dumb-init to properly handle signals
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+
+# Run entrypoint script then start production server
+CMD ["/usr/local/bin/docker-entrypoint.sh", "npm", "start"]
